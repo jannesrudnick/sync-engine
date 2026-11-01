@@ -25,7 +25,7 @@ A local-first sync engine after Linear's, for React + Supabase. Peer dependencie
    It ships ES modules for a bundler (Next.js, Vite); Node alone can't import it.
 
 2. Copy `schema.sql` (also at `node_modules/@jannesrudnick/sync-engine/schema.sql`) into a migration. Add one `create trigger … record_sync_action('id', 'user_id', …columns)` per synced table, and add `sync_actions` to the realtime publication. Synced tables need `id uuid` and `user_id uuid`; RLS on `sync_actions` scopes rows to `user_id`.
-3. Write a server action that runs a batch of mutations in order, with each mutation safe to run twice. It returns `{ error?, syncId }` per entry, with `syncId = await lastSyncId(serverClient)` taken after the batch.
+3. Write a server action that runs a batch of mutations in order (at most `BATCH_LIMIT`, 100, per call), with each mutation safe to run twice. It returns `{ error?, syncId }` per entry, with `syncId = await lastSyncId(serverClient)` taken after the batch.
 4. In the browser, once per page load:
 
    ```ts

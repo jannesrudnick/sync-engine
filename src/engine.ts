@@ -59,6 +59,8 @@ type Transaction = {
 const META = "_meta"
 const TRANSACTIONS = "_transactions"
 const DELTA_LIMIT = 1000
+/** Transactions per request; the rest go in the next one. */
+export const BATCH_LIMIT = 100
 const RETRY_MS = [1000, 2000, 5000, 10_000, 30_000]
 
 export class SyncEngine {
@@ -304,9 +306,9 @@ export class SyncEngine {
   /** Sends the transactions not sent yet, in order, as batches. */
   private async flush() {
     if (this.sending) return
-    const batch = this.transactions.filter(
-      (tx) => tx.syncId === undefined && tx.tab === this.tab
-    )
+    const batch = this.transactions
+      .filter((tx) => tx.syncId === undefined && tx.tab === this.tab)
+      .slice(0, BATCH_LIMIT)
     if (!batch.length) return
 
     this.sending = true
@@ -347,7 +349,7 @@ export class SyncEngine {
     this.completeConfirmed()
     if (this.transactions.some((tx) => tx.syncId !== undefined))
       void this.catchUp()
-    // Edits made while this batch was on its way.
+    // The rest of the queue, and edits made while this batch was on its way.
     void this.flush()
   }
 
