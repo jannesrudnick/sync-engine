@@ -1,6 +1,6 @@
 {
   "name": "@jannesrudnick/sync-engine",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Local-first sync engine after Linear's, for React + Supabase.",
   "type": "module",
   "exports": {
@@ -18,8 +18,7 @@
   "sideEffects": false,
   "scripts": {
     "build": "tsc",
-    "typecheck": "tsc --noEmit",
-    "prepare": "tsc"
+    "typecheck": "tsc --noEmit"
   },
   "peerDependencies": {
     "@supabase/supabase-js": "^2.0.0",

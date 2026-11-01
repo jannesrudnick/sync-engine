@@ -63,7 +63,7 @@ A local-first sync engine after Linear's, for React + Supabase. Peer dependencie
 
 ## Developing
 
-`npm install`, then `npm run typecheck` / `npm run build`. Bump `version` in `package.json` and tag (`v0.2.0`) to release; apps pin a tag with `github:jannesrudnick/sync-engine#v0.2.0`.
+`npm install`, then `npm run typecheck` / `npm run build`. `dist` is committed, so installs need no build step: rebuild and commit it with every change. Bump `version` in `package.json` and tag (`v0.2.0`) to release; apps pin a tag with `github:jannesrudnick/sync-engine#v0.2.0`.
 
 ## Limits
 
