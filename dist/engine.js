@@ -1,3 +1,4 @@
+import { makeDraft } from "./draft";
 import { deleteOthers, getAll, openDb, write } from "./idb";
 import { Pool } from "./pool";
 const META = "_meta";
@@ -53,6 +54,23 @@ export class SyncEngine {
         const result = new Promise((resolve) => this.waiting.set(tx.id, resolve));
         queueMicrotask(() => void this.flush());
         return result;
+    }
+    /**
+     * A draft of a row in the pool: assign fields, then `save()` (see
+     * `draft.ts`). Throws when the pool has no such row.
+     */
+    draft(model, id) {
+        if (!this.pool.get(model, id))
+            throw new Error(`No ${model} row ${id} in the pool.`);
+        return makeDraft(this, model, id, false);
+    }
+    /**
+     * A new row as a draft: not in the pool until `save()` inserts it. The id
+     * is `fields.id` or a new UUID.
+     */
+    create(model, fields = {}) {
+        const id = typeof fields.id === "string" ? fields.id : crypto.randomUUID();
+        return makeDraft(this, model, id, true, fields);
     }
     /** Fetches what changed on the server now (e.g. after a server action). */
     sync() {

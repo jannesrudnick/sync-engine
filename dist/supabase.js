@@ -1,3 +1,4 @@
+import { DRAFT_MUTATIONS } from "./draft";
 // PostgREST returns at most `max_rows` rows per request (Supabase: 1000).
 const PAGE_SIZE = 1000;
 /**
@@ -75,4 +76,59 @@ sb) {
         .limit(1)
         .maybeSingle();
     return data?.id ?? 0;
+}
+/**
+ * Runs a mutation a draft sent (`DRAFT_MUTATIONS`) on the server; null for
+ * any other mutation, which the app runs itself. For the batch of
+ * `EngineConfig.send`:
+ *
+ *   for (const m of batch)
+ *     results.push((await runDraftMutation(sb, m, { columns, userId })) ?? (await runOwn(m)))
+ *
+ * Only the models in `columns` and their listed columns can be written
+ * (never `id` or `user_id`); RLS still decides which rows. Running a
+ * mutation twice is harmless: a create of an existing id does nothing.
+ */
+export async function runDraftMutation(
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+sb, { name, args }, options) {
+    const kinds = Object.values(DRAFT_MUTATIONS);
+    if (!kinds.includes(name))
+        return null;
+    const [model, id, fields] = args;
+    const allowed = options.columns[model];
+    if (!allowed)
+        return { error: `Unknown model "${model}".` };
+    if (typeof id !== "string")
+        return { error: "Missing id." };
+    let values = {};
+    if (name !== DRAFT_MUTATIONS.delete) {
+        for (const [k, v] of Object.entries(fields ?? {})) {
+            if (k === "id" || k === "user_id" || !allowed.includes(k))
+                return { error: `The column "${k}" of ${model} cannot be written.` };
+            values[k] = v;
+        }
+    }
+    let result;
+    if (name === DRAFT_MUTATIONS.create) {
+        values = { ...values, id, user_id: options.userId };
+        result = await sb
+            .from(model)
+            .upsert(values, { onConflict: "id", ignoreDuplicates: true });
+    }
+    else if (name === DRAFT_MUTATIONS.update) {
+        result = await sb.from(model).update(values).eq("id", id).select("id");
+        if (!result.error && !result.data?.length)
+            return { error: `The ${model} row ${id} does not exist.` };
+    }
+    else if (options.softDelete?.includes(model)) {
+        result = await sb
+            .from(model)
+            .update({ deleted_at: new Date().toISOString() })
+            .eq("id", id);
+    }
+    else {
+        result = await sb.from(model).delete().eq("id", id);
+    }
+    return result.error ? { error: result.error.message } : {};
 }

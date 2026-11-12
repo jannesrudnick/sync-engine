@@ -1,3 +1,4 @@
+import { makeDraft, type Draft } from "./draft"
 import { deleteOthers, getAll, openDb, write } from "./idb"
 import { Pool, type Change, type Row, type SyncAction } from "./pool"
 
@@ -113,6 +114,28 @@ export class SyncEngine {
     )
     queueMicrotask(() => void this.flush())
     return result
+  }
+
+  /**
+   * A draft of a row in the pool: assign fields, then `save()` (see
+   * `draft.ts`). Throws when the pool has no such row.
+   */
+  draft<T extends Row = Row>(model: string, id: string): Draft<T> {
+    if (!this.pool.get(model, id))
+      throw new Error(`No ${model} row ${id} in the pool.`)
+    return makeDraft<T>(this, model, id, false)
+  }
+
+  /**
+   * A new row as a draft: not in the pool until `save()` inserts it. The id
+   * is `fields.id` or a new UUID.
+   */
+  create<T extends Row = Row>(
+    model: string,
+    fields: Partial<T> = {}
+  ): Draft<T> {
+    const id = typeof fields.id === "string" ? fields.id : crypto.randomUUID()
+    return makeDraft<T>(this, model, id, true, fields)
   }
 
   /** Fetches what changed on the server now (e.g. after a server action). */

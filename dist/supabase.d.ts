@@ -11,3 +11,28 @@ export declare function supabaseSource(sb: SupabaseClient<any, any, any>, column
  * of transactions (see `EngineConfig.send`).
  */
 export declare function lastSyncId(sb: SupabaseClient<any, any, any>): Promise<number>;
+/**
+ * Runs a mutation a draft sent (`DRAFT_MUTATIONS`) on the server; null for
+ * any other mutation, which the app runs itself. For the batch of
+ * `EngineConfig.send`:
+ *
+ *   for (const m of batch)
+ *     results.push((await runDraftMutation(sb, m, { columns, userId })) ?? (await runOwn(m)))
+ *
+ * Only the models in `columns` and their listed columns can be written
+ * (never `id` or `user_id`); RLS still decides which rows. Running a
+ * mutation twice is harmless: a create of an existing id does nothing.
+ */
+export declare function runDraftMutation(sb: SupabaseClient<any, any, any>, { name, args }: {
+    name: string;
+    args: unknown[];
+}, options: {
+    /** Per model the columns a draft may write, e.g. the `COLUMNS` of `supabaseSource`. */
+    columns: Record<string, readonly string[]>;
+    /** Set as `user_id` of created rows. */
+    userId: string;
+    /** Models whose delete sets `deleted_at` instead of deleting the row. */
+    softDelete?: readonly string[];
+}): Promise<{
+    error?: string;
+} | null>;

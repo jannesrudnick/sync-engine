@@ -1,3 +1,4 @@
+import { type Draft } from "./draft";
 import { Pool, type Change, type Row, type SyncAction } from "./pool";
 /**
  * A sync engine after Linear's (see README.md):
@@ -73,6 +74,16 @@ export declare class SyncEngine {
      * it failed (and was rolled back), or undefined once the server ran it.
      */
     commit(name: string, args: unknown[], changes: Change[]): Promise<string | undefined>;
+    /**
+     * A draft of a row in the pool: assign fields, then `save()` (see
+     * `draft.ts`). Throws when the pool has no such row.
+     */
+    draft<T extends Row = Row>(model: string, id: string): Draft<T>;
+    /**
+     * A new row as a draft: not in the pool until `save()` inserts it. The id
+     * is `fields.id` or a new UUID.
+     */
+    create<T extends Row = Row>(model: string, fields?: Partial<T>): Draft<T>;
     /** Fetches what changed on the server now (e.g. after a server action). */
     sync(): Promise<void>;
     /** Whether edits are waiting to be sent or confirmed. */

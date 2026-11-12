@@ -61,6 +61,32 @@ A local-first sync engine after Linear's, for React + Supabase. Peer dependencie
 
    `useLoadedView` + `<SyncGate fallback={…}>` suspend instead of returning undefined.
 
+6. Or write with drafts, as with Linear's models: assign fields, then `save()`. A save is a `commit` of a generic mutation (`sync.create` / `sync.update` / `sync.delete`), so it is optimistic, queued and rolled back like any other edit.
+
+   ```ts
+   const issue = getEngine().draft<Issue>("issues", id)
+   issue.title = "New title"
+   issue.status = "done"
+   await issue.save() // patches only the fields that differ from the pool
+
+   const created = getEngine().create<Issue>("issues", { title: "New" })
+   await created.save() // inserts; not in the pool before
+   await issue.delete()
+   ```
+
+   Unset fields read through to the pool, so a draft shows what changes elsewhere. `isDirty`, `isNew` and `discard()` are there too; `save`, `delete`, `discard`, `isDirty` and `isNew` can't be column names. In React, `useDraft<Issue>("issues", id)` keeps one draft per row and re-renders when you assign to it.
+
+   On the server, run them with `runDraftMutation` in the batch of step 3. It writes only the columns you list (never `id` or `user_id`) and returns null for your own mutations:
+
+   ```ts
+   for (const m of batch) {
+     const r = await runDraftMutation(sb, m, { columns: COLUMNS, userId, softDelete: ["issues"] })
+     results.push(r ?? (await runOwnMutation(m)))
+   }
+   ```
+
+   Keep named mutations (`commit`) for edits with rules or side effects; drafts are for plain field updates.
+
 ## Developing
 
 `npm install`, then `npm run typecheck` / `npm run build`. `dist` is committed, so installs need no build step: rebuild and commit it with every change. Bump `version` in `package.json` and tag (`v0.2.0`) to release; apps pin a tag with `github:jannesrudnick/sync-engine#v0.2.0`.

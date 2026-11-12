@@ -1,2 +1,3 @@
 export { BATCH_LIMIT, SyncEngine } from "./engine";
-export { lastSyncId, supabaseSource } from "./supabase";
+export { lastSyncId, runDraftMutation, supabaseSource } from "./supabase";
+export { DRAFT_MUTATIONS, } from "./draft";

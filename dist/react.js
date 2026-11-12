@@ -1,5 +1,6 @@
 "use client";
-import { use, useSyncExternalStore } from "react";
+import { use, useMemo, useSyncExternalStore } from "react";
+import { draftVersion, onDraftChange } from "./draft";
 /** The engine of this page; set once by the app (see README). */
 let engine = null;
 export function setEngine(e) {
@@ -60,4 +61,21 @@ export function useLoadedView(read, key = "") {
 export function SyncGate({ fallback, children, }) {
     const ready = useSyncExternalStore(subscribe, isReady, () => false);
     return ready ? children : fallback;
+}
+/**
+ * A draft of a row for a form (see `SyncEngine.draft`): the same draft
+ * across renders, re-rendering when fields are set or the row changes in
+ * the pool. Undefined until the pool has the row, and once it is deleted.
+ *
+ *   const issue = useDraft<Issue>("issues", id)
+ *   <input value={issue.title} onChange={(e) => (issue.title = e.target.value)} />
+ *   <button disabled={!issue.isDirty} onClick={() => issue.save()}>Save</button>
+ */
+export function useDraft(model, id) {
+    const exists = useSyncExternalStore(subscribe, () => isReady() && !!getEngine().pool.get(model, id), () => false);
+    const draft = useMemo(() => (exists ? getEngine().draft(model, id) : undefined), [model, id, exists]);
+    // Fields read through to the pool: re-render when the model changes too.
+    useSyncExternalStore(subscribe, () => (isReady() ? getEngine().pool.version(model) : 0), () => 0);
+    useSyncExternalStore((listener) => (draft ? onDraftChange(draft, listener) : () => { }), () => (draft ? draftVersion(draft) : 0), () => 0);
+    return draft;
 }
