@@ -2,20 +2,23 @@ import { DRAFT_MUTATIONS } from "./draft";
 // PostgREST returns at most `max_rows` rows per request (Supabase: 1000).
 const PAGE_SIZE = 1000;
 /**
- * Bootstrap, delta and realtime for a Supabase project with the
- * `sync_actions` table of `schema.sql`. `columns` lists per table the columns
- * its trigger records; RLS decides which rows the user gets.
+ * Models, bootstrap, delta, realtime and queries for a Supabase project
+ * with the `sync_actions` table of `schema.sql`. `columns` lists per table
+ * the columns its trigger records; RLS decides which rows the user gets.
  */
 export function supabaseSource(
 // Any typed client: the engine reads tables by name.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 sb, columns) {
-    async function all(table) {
+    const cols = columns;
+    /** Every row of `model` in `source` (its table by default) matching `params`. */
+    async function all(model, source = model, params = {}) {
         const rows = [];
         for (let from = 0;; from += PAGE_SIZE) {
-            const { data, error } = await sb
-                .from(table)
-                .select(columns[table].join(","))
+            let q = sb.from(source).select(cols[model].join(","));
+            for (const [column, value] of Object.entries(params))
+                q = value === null ? q.is(column, null) : q.eq(column, value);
+            const { data, error } = await q
                 .order("id")
                 .range(from, from + PAGE_SIZE - 1);
             if (error)
@@ -26,20 +29,19 @@ sb, columns) {
         }
     }
     return {
-        async bootstrap() {
+        models: Object.keys(columns),
+        async bootstrap(models) {
             // The sync id first: changes made while the rows load come again as
             // sync actions, and applying them twice is harmless.
-            const { data: last, error } = await sb
-                .from("sync_actions")
-                .select("id")
-                .order("id", { ascending: false })
-                .limit(1)
-                .maybeSingle();
-            if (error)
-                throw error;
+            const syncId = await newestSyncId(sb);
             const rows = {};
-            await Promise.all(Object.keys(columns).map(async (t) => (rows[t] = await all(t))));
-            return { lastSyncId: last?.id ?? 0, rows };
+            await Promise.all(models.map(async (t) => (rows[t] = await all(t))));
+            return { lastSyncId: syncId, rows };
+        },
+        async query(model, source, params) {
+            // As for the bootstrap: the sync id first.
+            const syncId = await newestSyncId(sb);
+            return { syncId, rows: await all(model, source, params) };
         },
         async delta(syncId, limit) {
             const { data, error } = await sb
@@ -69,12 +71,19 @@ sb, columns) {
 export async function lastSyncId(
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 sb) {
-    const { data } = await sb
+    return newestSyncId(sb).catch(() => 0);
+}
+async function newestSyncId(
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+sb) {
+    const { data, error } = await sb
         .from("sync_actions")
         .select("id")
         .order("id", { ascending: false })
         .limit(1)
         .maybeSingle();
+    if (error)
+        throw error;
     return data?.id ?? 0;
 }
 /**

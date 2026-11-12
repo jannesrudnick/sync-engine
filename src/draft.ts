@@ -1,5 +1,5 @@
 import type { SyncEngine } from "./engine"
-import type { Row } from "./pool"
+import type { Change, ModelName, Row } from "./types"
 
 /**
  * Drafts, after Linear's models: a row you assign fields on and then
@@ -43,7 +43,9 @@ export type DraftMethods = {
 }
 
 /** A row you assign fields on; `save()` commits them. */
-export type Draft<T extends Row = Row> = T & DraftMethods
+export type Draft<T extends { id: string } = Row> = Omit<T, "id"> & {
+  readonly id: string
+} & DraftMethods
 
 const RESERVED = new Set(["save", "delete", "discard", "isDirty", "isNew"])
 
@@ -58,7 +60,7 @@ const states = new WeakMap<object, State>()
 
 type Engine = Pick<SyncEngine, "pool" | "commit">
 
-export function makeDraft<T extends Row>(
+export function makeDraft<T extends { id: string }>(
   engine: Engine,
   model: string,
   id: string,
@@ -67,6 +69,12 @@ export function makeDraft<T extends Row>(
 ): Draft<T> {
   if (!engine.pool.models.includes(model))
     throw new Error(`Unknown model "${model}".`)
+  // The draft mutations are not among the app's registered ones.
+  const commit = engine.commit as (
+    name: string,
+    args: unknown[],
+    changes: Change[]
+  ) => Promise<string | undefined>
   const state: State = {
     changes: {},
     isNew,
@@ -74,7 +82,9 @@ export function makeDraft<T extends Row>(
     listeners: new Set(),
   }
   const current = () =>
-    state.isNew ? undefined : engine.pool.get(model, id)
+    state.isNew
+      ? undefined
+      : (engine.pool.get(model as ModelName, id) as Row | undefined)
   const changed = () => {
     state.version++
     for (const l of state.listeners) l()
@@ -95,8 +105,8 @@ export function makeDraft<T extends Row>(
         state.isNew = false
         state.changes = {}
         changed()
-        return engine.commit(DRAFT_MUTATIONS.create, [model, id, values], [
-          { model, id, op: "set", row },
+        return commit.call(engine, DRAFT_MUTATIONS.create, [model, id, values], [
+          { model, id, op: "set", row } as Change,
         ])
       }
       const patch = dirtyPatch()
@@ -105,8 +115,8 @@ export function makeDraft<T extends Row>(
       if (!Object.keys(patch).length) return Promise.resolve(undefined)
       if (!current())
         return Promise.resolve(`The ${model} row ${id} no longer exists.`)
-      return engine.commit(DRAFT_MUTATIONS.update, [model, id, patch], [
-        { model, id, op: "patch", patch },
+      return commit.call(engine, DRAFT_MUTATIONS.update, [model, id, patch], [
+        { model, id, op: "patch", patch } as Change,
       ])
     },
     delete() {
@@ -114,8 +124,8 @@ export function makeDraft<T extends Row>(
       state.changes = {}
       changed()
       if (wasNew) return Promise.resolve(undefined)
-      return engine.commit(DRAFT_MUTATIONS.delete, [model, id], [
-        { model, id, op: "delete" },
+      return commit.call(engine, DRAFT_MUTATIONS.delete, [model, id], [
+        { model, id, op: "delete" } as Change,
       ])
     },
     discard() {

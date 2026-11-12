@@ -2,28 +2,40 @@ import type { SupabaseClient } from "@supabase/supabase-js"
 
 import { DRAFT_MUTATIONS } from "./draft"
 import type { EngineConfig } from "./engine"
-import type { Row, SyncAction } from "./pool"
+import type { SyncAction } from "./pool"
+import type { Columns, ModelName, Row } from "./types"
 
 // PostgREST returns at most `max_rows` rows per request (Supabase: 1000).
 const PAGE_SIZE = 1000
 
 /**
- * Bootstrap, delta and realtime for a Supabase project with the
- * `sync_actions` table of `schema.sql`. `columns` lists per table the columns
- * its trigger records; RLS decides which rows the user gets.
+ * Models, bootstrap, delta, realtime and queries for a Supabase project
+ * with the `sync_actions` table of `schema.sql`. `columns` lists per table
+ * the columns its trigger records; RLS decides which rows the user gets.
  */
 export function supabaseSource(
   // Any typed client: the engine reads tables by name.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   sb: SupabaseClient<any, any, any>,
-  columns: Record<string, readonly string[]>
-): Pick<EngineConfig, "bootstrap" | "delta" | "subscribe"> {
-  async function all(table: string) {
+  columns: Columns
+): Pick<
+  EngineConfig,
+  "models" | "bootstrap" | "delta" | "subscribe" | "query"
+> {
+  const cols = columns as Record<string, readonly string[]>
+
+  /** Every row of `model` in `source` (its table by default) matching `params`. */
+  async function all(
+    model: string,
+    source = model,
+    params: Record<string, unknown> = {}
+  ) {
     const rows: Row[] = []
     for (let from = 0; ; from += PAGE_SIZE) {
-      const { data, error } = await sb
-        .from(table)
-        .select(columns[table].join(","))
+      let q = sb.from(source).select(cols[model].join(","))
+      for (const [column, value] of Object.entries(params))
+        q = value === null ? q.is(column, null) : q.eq(column, value)
+      const { data, error } = await q
         .order("id")
         .range(from, from + PAGE_SIZE - 1)
       if (error) throw error
@@ -33,21 +45,21 @@ export function supabaseSource(
   }
 
   return {
-    async bootstrap() {
+    models: Object.keys(columns) as ModelName[],
+
+    async bootstrap(models) {
       // The sync id first: changes made while the rows load come again as
       // sync actions, and applying them twice is harmless.
-      const { data: last, error } = await sb
-        .from("sync_actions")
-        .select("id")
-        .order("id", { ascending: false })
-        .limit(1)
-        .maybeSingle()
-      if (error) throw error
+      const syncId = await newestSyncId(sb)
       const rows: Record<string, Row[]> = {}
-      await Promise.all(
-        Object.keys(columns).map(async (t) => (rows[t] = await all(t)))
-      )
-      return { lastSyncId: (last as { id: number } | null)?.id ?? 0, rows }
+      await Promise.all(models.map(async (t) => (rows[t] = await all(t))))
+      return { lastSyncId: syncId, rows }
+    },
+
+    async query(model, source, params) {
+      // As for the bootstrap: the sync id first.
+      const syncId = await newestSyncId(sb)
+      return { syncId, rows: await all(model, source, params) }
     },
 
     async delta(syncId, limit) {
@@ -84,12 +96,20 @@ export async function lastSyncId(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   sb: SupabaseClient<any, any, any>
 ) {
-  const { data } = await sb
+  return newestSyncId(sb).catch(() => 0)
+}
+
+async function newestSyncId(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  sb: SupabaseClient<any, any, any>
+) {
+  const { data, error } = await sb
     .from("sync_actions")
     .select("id")
     .order("id", { ascending: false })
     .limit(1)
     .maybeSingle()
+  if (error) throw error
   return (data as { id: number } | null)?.id ?? 0
 }
 
@@ -111,7 +131,7 @@ export async function runDraftMutation(
   { name, args }: { name: string; args: unknown[] },
   options: {
     /** Per model the columns a draft may write, e.g. the `COLUMNS` of `supabaseSource`. */
-    columns: Record<string, readonly string[]>
+    columns: Columns
     /** Set as `user_id` of created rows. */
     userId: string
     /** Models whose delete sets `deleted_at` instead of deleting the row. */
@@ -121,7 +141,7 @@ export async function runDraftMutation(
   const kinds: string[] = Object.values(DRAFT_MUTATIONS)
   if (!kinds.includes(name)) return null
   const [model, id, fields] = args as [string, string, Record<string, unknown>?]
-  const allowed = options.columns[model]
+  const allowed = (options.columns as Record<string, readonly string[]>)[model]
   if (!allowed) return { error: `Unknown model "${model}".` }
   if (typeof id !== "string") return { error: "Missing id." }
 

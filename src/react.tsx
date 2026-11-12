@@ -1,10 +1,11 @@
 "use client"
 
-import { use, useMemo, useSyncExternalStore } from "react"
+import { use, useEffect, useMemo, useSyncExternalStore } from "react"
 
 import { draftVersion, onDraftChange, type Draft } from "./draft"
-import type { SyncEngine } from "./engine"
-import type { Pool, Row } from "./pool"
+import { queryKey, type SyncEngine } from "./engine"
+import type { Pool } from "./pool"
+import type { ModelName, QuerySpec, RowOf } from "./types"
 
 /** The engine of this page; set once by the app (see README). */
 let engine: SyncEngine | null = null
@@ -20,6 +21,16 @@ export function getEngine() {
 
 export const hasEngine = () => engine !== null
 
+/**
+ * `use` must be called in every render once it suspended: with this
+ * promise when there is nothing to wait for (React reads `status` and does
+ * not suspend).
+ */
+const settled = Object.assign(Promise.resolve(), {
+  status: "fulfilled",
+  value: undefined,
+})
+
 // Without an engine (signed out) nothing is ever ready.
 const subscribe = (listener: () => void) =>
   engine ? engine.pool.subscribe(listener) : () => {}
@@ -32,7 +43,7 @@ const isReady = () => !!engine?.isReady
  * model holds tens of thousands of rows.
  */
 export function view<T>(
-  models: readonly string[],
+  models: readonly ModelName[],
   compute: (pool: Pool, key: string) => T
 ) {
   const cache = new Map<string, { at: string; value: T }>()
@@ -67,7 +78,7 @@ export function useView<T>(read: (key: string) => T, key = "") {
  */
 export function useLoadedView<T>(read: (key: string) => T, key = "") {
   const value = useView(read, key)
-  if (value === undefined) use(getEngine().ready)
+  use(value === undefined ? getEngine().ready : settled)
   return value as T
 }
 
@@ -91,18 +102,18 @@ export function SyncGate({
  * across renders, re-rendering when fields are set or the row changes in
  * the pool. Undefined until the pool has the row, and once it is deleted.
  *
- *   const issue = useDraft<Issue>("issues", id)
+ *   const issue = useDraft("issues", id) // Draft<Issue>
  *   <input value={issue.title} onChange={(e) => (issue.title = e.target.value)} />
  *   <button disabled={!issue.isDirty} onClick={() => issue.save()}>Save</button>
  */
-export function useDraft<T extends Row = Row>(model: string, id: string) {
+export function useDraft<M extends ModelName>(model: M, id: string) {
   const exists = useSyncExternalStore(
     subscribe,
     () => isReady() && !!getEngine().pool.get(model, id),
     () => false
   )
   const draft = useMemo(
-    () => (exists ? getEngine().draft<T>(model, id) : undefined),
+    () => (exists ? getEngine().draft(model, id) : undefined),
     [model, id, exists]
   )
   // Fields read through to the pool: re-render when the model changes too.
@@ -116,5 +127,45 @@ export function useDraft<T extends Row = Row>(model: string, id: string) {
     () => (draft ? draftVersion(draft) : 0),
     () => 0
   )
-  return draft as Draft<T> | undefined
+  return draft as Draft<RowOf<M>> | undefined
+}
+
+/**
+ * The rows of a query (see `QuerySpec`), fetched from the server view
+ * `source` and kept fresh while the component is mounted. Undefined until
+ * the first fetch (or from the cache of an earlier visit right away).
+ *
+ *   const issues = useQuery({
+ *     model: "issues",
+ *     source: "open_issues",
+ *     params: { project_id: projectId },
+ *     filter: (i) => i.project_id === projectId && i.status !== "done",
+ *   })
+ */
+export function useQuery<M extends ModelName>(
+  spec: QuerySpec<M>
+): RowOf<M>[] | undefined {
+  const key = queryKey(spec)
+  useEffect(
+    () => (hasEngine() ? getEngine().watchQuery(spec) : undefined),
+    // The key covers what the fetch depends on; `spec` is a new object
+    // every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [key]
+  )
+  return useSyncExternalStore<RowOf<M>[] | undefined>(
+    subscribe,
+    () => (isReady() ? getEngine().queryRows(spec) : undefined),
+    () => undefined
+  )
+}
+
+/**
+ * `useQuery` below a `<SyncGate>`: suspends until the first fetch instead
+ * of returning undefined. A failed first fetch goes to the error boundary.
+ */
+export function useLoadedQuery<M extends ModelName>(spec: QuerySpec<M>) {
+  const rows = useQuery(spec)
+  use(rows === undefined ? getEngine().loadQuery(spec) : settled)
+  return rows as RowOf<M>[]
 }

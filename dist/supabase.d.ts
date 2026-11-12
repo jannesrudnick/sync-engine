@@ -1,11 +1,12 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { EngineConfig } from "./engine";
+import type { Columns } from "./types";
 /**
- * Bootstrap, delta and realtime for a Supabase project with the
- * `sync_actions` table of `schema.sql`. `columns` lists per table the columns
- * its trigger records; RLS decides which rows the user gets.
+ * Models, bootstrap, delta, realtime and queries for a Supabase project
+ * with the `sync_actions` table of `schema.sql`. `columns` lists per table
+ * the columns its trigger records; RLS decides which rows the user gets.
  */
-export declare function supabaseSource(sb: SupabaseClient<any, any, any>, columns: Record<string, readonly string[]>): Pick<EngineConfig, "bootstrap" | "delta" | "subscribe">;
+export declare function supabaseSource(sb: SupabaseClient<any, any, any>, columns: Columns): Pick<EngineConfig, "models" | "bootstrap" | "delta" | "subscribe" | "query">;
 /**
  * The newest sync id the user can see, for the server's answer to a batch
  * of transactions (see `EngineConfig.send`).
@@ -28,7 +29,7 @@ export declare function runDraftMutation(sb: SupabaseClient<any, any, any>, { na
     args: unknown[];
 }, options: {
     /** Per model the columns a draft may write, e.g. the `COLUMNS` of `supabaseSource`. */
-    columns: Record<string, readonly string[]>;
+    columns: Columns;
     /** Set as `user_id` of created rows. */
     userId: string;
     /** Models whose delete sets `deleted_at` instead of deleting the row. */

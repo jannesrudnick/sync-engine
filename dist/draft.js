@@ -25,13 +25,17 @@ const states = new WeakMap();
 export function makeDraft(engine, model, id, isNew, fields = {}) {
     if (!engine.pool.models.includes(model))
         throw new Error(`Unknown model "${model}".`);
+    // The draft mutations are not among the app's registered ones.
+    const commit = engine.commit;
     const state = {
         changes: {},
         isNew,
         version: 0,
         listeners: new Set(),
     };
-    const current = () => state.isNew ? undefined : engine.pool.get(model, id);
+    const current = () => state.isNew
+        ? undefined
+        : engine.pool.get(model, id);
     const changed = () => {
         state.version++;
         for (const l of state.listeners)
@@ -53,7 +57,7 @@ export function makeDraft(engine, model, id, isNew, fields = {}) {
                 state.isNew = false;
                 state.changes = {};
                 changed();
-                return engine.commit(DRAFT_MUTATIONS.create, [model, id, values], [
+                return commit.call(engine, DRAFT_MUTATIONS.create, [model, id, values], [
                     { model, id, op: "set", row },
                 ]);
             }
@@ -64,7 +68,7 @@ export function makeDraft(engine, model, id, isNew, fields = {}) {
                 return Promise.resolve(undefined);
             if (!current())
                 return Promise.resolve(`The ${model} row ${id} no longer exists.`);
-            return engine.commit(DRAFT_MUTATIONS.update, [model, id, patch], [
+            return commit.call(engine, DRAFT_MUTATIONS.update, [model, id, patch], [
                 { model, id, op: "patch", patch },
             ]);
         },
@@ -74,7 +78,7 @@ export function makeDraft(engine, model, id, isNew, fields = {}) {
             changed();
             if (wasNew)
                 return Promise.resolve(undefined);
-            return engine.commit(DRAFT_MUTATIONS.delete, [model, id], [
+            return commit.call(engine, DRAFT_MUTATIONS.delete, [model, id], [
                 { model, id, op: "delete" },
             ]);
         },

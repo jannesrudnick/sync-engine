@@ -1,6 +1,7 @@
 "use client";
-import { use, useMemo, useSyncExternalStore } from "react";
+import { use, useEffect, useMemo, useSyncExternalStore } from "react";
 import { draftVersion, onDraftChange } from "./draft";
+import { queryKey } from "./engine";
 /** The engine of this page; set once by the app (see README). */
 let engine = null;
 export function setEngine(e) {
@@ -12,6 +13,15 @@ export function getEngine() {
     return engine;
 }
 export const hasEngine = () => engine !== null;
+/**
+ * `use` must be called in every render once it suspended: with this
+ * promise when there is nothing to wait for (React reads `status` and does
+ * not suspend).
+ */
+const settled = Object.assign(Promise.resolve(), {
+    status: "fulfilled",
+    value: undefined,
+});
 // Without an engine (signed out) nothing is ever ready.
 const subscribe = (listener) => engine ? engine.pool.subscribe(listener) : () => { };
 const isReady = () => !!engine?.isReady;
@@ -50,8 +60,7 @@ export function useView(read, key = "") {
  */
 export function useLoadedView(read, key = "") {
     const value = useView(read, key);
-    if (value === undefined)
-        use(getEngine().ready);
+    use(value === undefined ? getEngine().ready : settled);
     return value;
 }
 /**
@@ -67,7 +76,7 @@ export function SyncGate({ fallback, children, }) {
  * across renders, re-rendering when fields are set or the row changes in
  * the pool. Undefined until the pool has the row, and once it is deleted.
  *
- *   const issue = useDraft<Issue>("issues", id)
+ *   const issue = useDraft("issues", id) // Draft<Issue>
  *   <input value={issue.title} onChange={(e) => (issue.title = e.target.value)} />
  *   <button disabled={!issue.isDirty} onClick={() => issue.save()}>Save</button>
  */
@@ -78,4 +87,34 @@ export function useDraft(model, id) {
     useSyncExternalStore(subscribe, () => (isReady() ? getEngine().pool.version(model) : 0), () => 0);
     useSyncExternalStore((listener) => (draft ? onDraftChange(draft, listener) : () => { }), () => (draft ? draftVersion(draft) : 0), () => 0);
     return draft;
+}
+/**
+ * The rows of a query (see `QuerySpec`), fetched from the server view
+ * `source` and kept fresh while the component is mounted. Undefined until
+ * the first fetch (or from the cache of an earlier visit right away).
+ *
+ *   const issues = useQuery({
+ *     model: "issues",
+ *     source: "open_issues",
+ *     params: { project_id: projectId },
+ *     filter: (i) => i.project_id === projectId && i.status !== "done",
+ *   })
+ */
+export function useQuery(spec) {
+    const key = queryKey(spec);
+    useEffect(() => (hasEngine() ? getEngine().watchQuery(spec) : undefined), 
+    // The key covers what the fetch depends on; `spec` is a new object
+    // every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [key]);
+    return useSyncExternalStore(subscribe, () => (isReady() ? getEngine().queryRows(spec) : undefined), () => undefined);
+}
+/**
+ * `useQuery` below a `<SyncGate>`: suspends until the first fetch instead
+ * of returning undefined. A failed first fetch goes to the error boundary.
+ */
+export function useLoadedQuery(spec) {
+    const rows = useQuery(spec);
+    use(rows === undefined ? getEngine().loadQuery(spec) : settled);
+    return rows;
 }

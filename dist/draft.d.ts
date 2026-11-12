@@ -1,5 +1,5 @@
 import type { SyncEngine } from "./engine";
-import type { Row } from "./pool";
+import type { Row } from "./types";
 /**
  * Drafts, after Linear's models: a row you assign fields on and then
  * `save()`. Saving is an ordinary transaction (`SyncEngine.commit`) with a
@@ -39,9 +39,15 @@ export type DraftMethods = {
     readonly isNew: boolean;
 };
 /** A row you assign fields on; `save()` commits them. */
-export type Draft<T extends Row = Row> = T & DraftMethods;
+export type Draft<T extends {
+    id: string;
+} = Row> = Omit<T, "id"> & {
+    readonly id: string;
+} & DraftMethods;
 type Engine = Pick<SyncEngine, "pool" | "commit">;
-export declare function makeDraft<T extends Row>(engine: Engine, model: string, id: string, isNew: boolean, fields?: Record<string, unknown>): Draft<T>;
+export declare function makeDraft<T extends {
+    id: string;
+}>(engine: Engine, model: string, id: string, isNew: boolean, fields?: Record<string, unknown>): Draft<T>;
 /** For `useDraft`: calls `listener` when fields are set or saved. */
 export declare function onDraftChange(draft: object, listener: () => void): () => void;
 /** For `useDraft`: grows with every change of the draft. */
