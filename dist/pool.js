@@ -1,10 +1,11 @@
 /**
  * The object pool: every row of every synced model, in memory.
  *
- * Two layers, like Linear's: `base` is what the server confirmed (bootstrap
- * plus sync actions), and the pending transactions are laid over it in
- * order. What views read (`get`, `rows`) is base with the pending changes
- * applied. A sync action for a row with a pending change rebases it: the new
+ * Three layers, like Linear's: `base` is what the server confirmed
+ * (bootstrap plus sync actions), the pending transactions are laid over it
+ * in order, and on top are the unsaved edits of drafts (fields assigned but
+ * not saved yet). What views read (`get`, `rows`) is all three, so an edit
+ * shows everywhere the moment a field is assigned. A sync action for a row with a pending change rebases it: the new
  * server state goes into base and the change is applied on top again. A
  * transaction that fails is dropped and its rows fall back to base; one the
  * server confirmed is dropped once base has its effect.
@@ -14,6 +15,8 @@ export class Pool {
     base = new Map();
     visible = new Map();
     layers = [];
+    /** Unsaved edits: model → id → the fields a draft assigned. */
+    unsaved = new Map();
     versions = new Map();
     arrays = new Map();
     listeners = new Set();
@@ -99,6 +102,40 @@ export class Pool {
     baseRow(model, id) {
         return this.base.get(model)?.get(id);
     }
+    /**
+     * The row as saved: base with the pending transactions, without unsaved
+     * edits. A draft saves the fields that differ from it.
+     */
+    saved(model, id) {
+        let row = this.base.get(model)?.get(id);
+        for (const { changes } of this.layers)
+            for (const c of changes) {
+                if (c.model !== model || c.id !== id)
+                    continue;
+                if (c.op === "set")
+                    row = c.row;
+                else if (c.op === "delete")
+                    row = undefined;
+                else if (row)
+                    row = { ...row, ...c.patch };
+            }
+        return row;
+    }
+    /**
+     * Sets a row's unsaved edits (a draft's assigned fields), shown on top of
+     * everything; null takes them off (saved or discarded).
+     */
+    setUnsaved(model, id, fields) {
+        let rows = this.unsaved.get(model);
+        if (!rows)
+            this.unsaved.set(model, (rows = new Map()));
+        if (fields && Object.keys(fields).length)
+            rows.set(id, fields);
+        else if (!rows.delete(id))
+            return;
+        this.recompute(model, id);
+        this.notify([model]);
+    }
     /** Lays a transaction's changes over base. */
     push(key, changes) {
         this.layers.push({ key, changes: changes });
@@ -121,18 +158,10 @@ export class Pool {
         this.notify(models);
     }
     recompute(model, id) {
-        let row = this.base.get(model)?.get(id);
-        for (const { changes } of this.layers)
-            for (const c of changes) {
-                if (c.model !== model || c.id !== id)
-                    continue;
-                if (c.op === "set")
-                    row = c.row;
-                else if (c.op === "delete")
-                    row = undefined;
-                else if (row)
-                    row = { ...row, ...c.patch };
-            }
+        let row = this.saved(model, id);
+        const edits = this.unsaved.get(model)?.get(id);
+        if (row && edits)
+            row = { ...row, ...edits };
         const visible = this.visible.get(model);
         if (!visible)
             return;
@@ -148,6 +177,8 @@ export class Pool {
                 for (const c of changes)
                     if (c.model === m)
                         this.recompute(m, c.id);
+            for (const id of this.unsaved.get(m)?.keys() ?? [])
+                this.recompute(m, id);
         }
         this.notify(this.models);
     }

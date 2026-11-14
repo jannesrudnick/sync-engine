@@ -10,6 +10,8 @@ const DELTA_LIMIT = 1000;
 /** Transactions per request; the rest go in the next one. */
 export const BATCH_LIMIT = 100;
 const RETRY_MS = [1000, 2000, 5000, 10_000, 30_000];
+/** Saved edits `undo` can take back. */
+const UNDO_LIMIT = 100;
 export class SyncEngine {
     config;
     pool;
@@ -28,6 +30,12 @@ export class SyncEngine {
     catchUpAgain = false;
     cleanup = [];
     queries = new Map();
+    /** One draft per row, as Linear has one model object per row. */
+    drafts = new Map();
+    /** Saved edits of this tab, newest last, for `undo`; undone ones for `redo`. */
+    done = [];
+    undone = [];
+    replaying = false;
     refetchTimer;
     constructor(config) {
         this.config = config;
@@ -67,7 +75,68 @@ export class SyncEngine {
     draft(model, id) {
         if (!this.pool.get(model, id))
             throw new Error(`No ${model} row ${id} in the pool.`);
-        return makeDraft(this, model, id, false);
+        const key = `${model}:${id}`;
+        let draft = this.drafts.get(key);
+        if (!draft) {
+            draft = makeDraft(this, model, id, false);
+            this.drafts.set(key, draft);
+        }
+        return draft;
+    }
+    /** Called by a draft's `save()`: the edit, for `undo`. */
+    remember(edit) {
+        if (this.replaying)
+            return;
+        this.done.push(edit);
+        if (this.done.length > UNDO_LIMIT)
+            this.done.shift();
+        this.undone = [];
+    }
+    /** Whether `undo` / `redo` has an edit to take back or make again. */
+    get canUndo() {
+        return this.done.length > 0;
+    }
+    get canRedo() {
+        return this.undone.length > 0;
+    }
+    /**
+     * Takes back this tab's last saved edit, as a new transaction: the old
+     * values are saved again (a created row is deleted). Deletes can't be
+     * undone. Resolves like `save()`; undefined when there is nothing to undo.
+     */
+    undo() {
+        const edit = this.done.pop();
+        if (!edit)
+            return Promise.resolve(undefined);
+        this.undone.push(edit);
+        return this.replay(edit.model, edit.id, edit.before);
+    }
+    /** Makes the last undone edit again. */
+    redo() {
+        const edit = this.undone.pop();
+        if (!edit)
+            return Promise.resolve(undefined);
+        this.done.push(edit);
+        return this.replay(edit.model, edit.id, edit.after);
+    }
+    /** Saves `fields` on a row (null deletes it) without remembering it. */
+    replay(model, id, fields) {
+        this.replaying = true;
+        try {
+            if (!this.pool.get(model, id) && fields)
+                return makeDraft(this, model, id, true, { ...fields }).save();
+            if (!this.pool.get(model, id))
+                return Promise.resolve(undefined);
+            const draft = this.draft(model, id);
+            if (!fields)
+                return draft.delete();
+            for (const [k, v] of Object.entries(fields))
+                draft[k] = v;
+            return draft.save();
+        }
+        finally {
+            this.replaying = false;
+        }
     }
     /**
      * A new row as a draft: not in the pool until `save()` inserts it. The id

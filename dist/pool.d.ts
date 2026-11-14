@@ -1,10 +1,11 @@
 /**
  * The object pool: every row of every synced model, in memory.
  *
- * Two layers, like Linear's: `base` is what the server confirmed (bootstrap
- * plus sync actions), and the pending transactions are laid over it in
- * order. What views read (`get`, `rows`) is base with the pending changes
- * applied. A sync action for a row with a pending change rebases it: the new
+ * Three layers, like Linear's: `base` is what the server confirmed
+ * (bootstrap plus sync actions), the pending transactions are laid over it
+ * in order, and on top are the unsaved edits of drafts (fields assigned but
+ * not saved yet). What views read (`get`, `rows`) is all three, so an edit
+ * shows everywhere the moment a field is assigned. A sync action for a row with a pending change rebases it: the new
  * server state goes into base and the change is applied on top again. A
  * transaction that fails is dropped and its rows fall back to base; one the
  * server confirmed is dropped once base has its effect.
@@ -24,6 +25,8 @@ export declare class Pool {
     private base;
     private visible;
     private layers;
+    /** Unsaved edits: model → id → the fields a draft assigned. */
+    private unsaved;
     private versions;
     private arrays;
     private listeners;
@@ -46,6 +49,16 @@ export declare class Pool {
     merge(model: string, rows: Row[]): Row[];
     /** The confirmed row, without pending changes. */
     baseRow(model: string, id: string): Row | undefined;
+    /**
+     * The row as saved: base with the pending transactions, without unsaved
+     * edits. A draft saves the fields that differ from it.
+     */
+    saved(model: string, id: string): Row | undefined;
+    /**
+     * Sets a row's unsaved edits (a draft's assigned fields), shown on top of
+     * everything; null takes them off (saved or discarded).
+     */
+    setUnsaved(model: string, id: string, fields: Record<string, unknown> | null): void;
     /** Lays a transaction's changes over base. */
     push(key: string, changes: Change[]): void;
     /** Takes a transaction's changes off again (failed or confirmed). */

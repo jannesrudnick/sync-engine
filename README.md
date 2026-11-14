@@ -140,7 +140,11 @@ A local-first sync engine after Linear's, for React + Supabase. Peer dependencie
    await issue.delete()
    ```
 
+   As in Linear, assigning a field changes the row in the pool at once (an unsaved layer on top of the pending transactions), so every view shows it before `save()`; `discard()` takes it back. Unsaved edits live in memory only. There is one draft per row: `draft("issues", id)` returns the same object every time.
+
    Unset fields read through to the pool, so a draft shows what changes elsewhere. `isDirty`, `isNew` and `discard()` are there too; `save`, `delete`, `discard`, `isDirty` and `isNew` can't be column names. In React, `useDraft("issues", id)` keeps one draft per row and re-renders when you assign to it.
+
+   Undo and redo, as in Linear: every `save()` remembers the old values of the fields it changed. `getEngine().undo()` saves them again as a new transaction (a created row is deleted), `redo()` makes the edit again; `canUndo` / `canRedo` say whether there is one. The history is this tab's, the last 100 edits, and is gone on reload. Deletes can't be undone.
 
    On the server, run them with `runDraftMutation` in the batch of step 3. It writes only the columns you list (never `id` or `user_id`) and returns null for your own mutations:
 

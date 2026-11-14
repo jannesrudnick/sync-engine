@@ -1,4 +1,4 @@
-import { type Draft } from "./draft";
+import { type Draft, type Edit } from "./draft";
 import { Pool, type SyncAction } from "./pool";
 import type { Change, FieldsOf, ModelName, MutationArgs, MutationName, QuerySpec, Row, RowOf } from "./types";
 /**
@@ -83,6 +83,12 @@ export declare class SyncEngine {
     private catchUpAgain;
     private cleanup;
     private queries;
+    /** One draft per row, as Linear has one model object per row. */
+    private drafts;
+    /** Saved edits of this tab, newest last, for `undo`; undone ones for `redo`. */
+    private done;
+    private undone;
+    private replaying;
     private refetchTimer;
     constructor(config: EngineConfig);
     /**
@@ -96,6 +102,21 @@ export declare class SyncEngine {
      * `draft.ts`). Throws when the pool has no such row.
      */
     draft<M extends ModelName>(model: M, id: string): Draft<RowOf<M>>;
+    /** Called by a draft's `save()`: the edit, for `undo`. */
+    remember(edit: Edit): void;
+    /** Whether `undo` / `redo` has an edit to take back or make again. */
+    get canUndo(): boolean;
+    get canRedo(): boolean;
+    /**
+     * Takes back this tab's last saved edit, as a new transaction: the old
+     * values are saved again (a created row is deleted). Deletes can't be
+     * undone. Resolves like `save()`; undefined when there is nothing to undo.
+     */
+    undo(): Promise<string | undefined>;
+    /** Makes the last undone edit again. */
+    redo(): Promise<string | undefined>;
+    /** Saves `fields` on a row (null deletes it) without remembering it. */
+    private replay;
     /**
      * A new row as a draft: not in the pool until `save()` inserts it. The id
      * is `fields.id` or a new UUID.

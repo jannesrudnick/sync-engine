@@ -24,4 +24,5 @@ export {
   DRAFT_MUTATIONS,
   type Draft,
   type DraftMethods,
+  type Edit,
 } from "./draft"

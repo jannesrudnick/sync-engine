@@ -1,15 +1,22 @@
 import type { SyncEngine } from "./engine";
 import type { Row } from "./types";
 /**
- * Drafts, after Linear's models: a row you assign fields on and then
+ * Drafts, like Linear's models: a row you assign fields on and then
  * `save()`. Saving is an ordinary transaction (`SyncEngine.commit`) with a
  * generic server mutation, so the optimistic update, the queue in IndexedDB,
  * rollback and rebase all work as for any other edit.
  *
+ * - Assigning a field changes the row in the pool at once (its unsaved
+ *   layer), so every view shows it before `save()`, as in Linear.
+ *   `discard()` takes it back. Unsaved edits live in memory only.
+ * - There is one draft per row (`SyncEngine.draft` returns the same
+ *   object), so everyone editing a row edits the same model.
  * - Fields you have not set read through to the pool, so a draft shows
  *   what other tabs and users change in the meantime.
- * - `save()` sends only the fields that differ from the pool now, as a
- *   patch: two people editing different fields of a row both win.
+ * - `save()` sends only the fields that differ from the saved row, as a
+ *   patch: two people editing different fields of a row both win. The
+ *   engine remembers the old values, so `SyncEngine.undo()` can put them
+ *   back.
  * - A draft from `SyncEngine.create` is new: it is not in the pool until
  *   `save()`, which inserts it.
  *
@@ -38,13 +45,25 @@ export type DraftMethods = {
     /** Whether the row is not saved yet (from `create`). */
     readonly isNew: boolean;
 };
+/**
+ * A saved edit, for undo: the fields before and after (`before` null for a
+ * created row).
+ */
+export type Edit = {
+    model: string;
+    id: string;
+    before: Record<string, unknown> | null;
+    after: Record<string, unknown>;
+};
 /** A row you assign fields on; `save()` commits them. */
 export type Draft<T extends {
     id: string;
 } = Row> = Omit<T, "id"> & {
     readonly id: string;
 } & DraftMethods;
-type Engine = Pick<SyncEngine, "pool" | "commit">;
+type Engine = Pick<SyncEngine, "pool" | "commit"> & {
+    remember(edit: Edit): void;
+};
 export declare function makeDraft<T extends {
     id: string;
 }>(engine: Engine, model: string, id: string, isNew: boolean, fields?: Record<string, unknown>): Draft<T>;
