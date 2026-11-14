@@ -1,5 +1,16 @@
+import { makeDraft, type Draft } from "./draft"
 import { deleteOthers, getAll, openDb, write } from "./idb"
-import { Pool, type Change, type Row, type SyncAction } from "./pool"
+import { Pool, type SyncAction } from "./pool"
+import type {
+  Change,
+  FieldsOf,
+  ModelName,
+  MutationArgs,
+  MutationName,
+  QuerySpec,
+  Row,
+  RowOf,
+} from "./types"
 
 /**
  * A sync engine after Linear's (see README.md):
@@ -16,6 +27,10 @@ import { Pool, type Change, type Row, type SyncAction } from "./pool"
  *   flickers back. Transactions survive a reload or a lost connection and
  *   are sent later; a tab sends its own, and those of tabs that were closed.
  *
+ * - Lazy models are not bootstrapped: queries (`queryRows`) load the rows
+ *   a screen needs from a server view. Sync actions keep loaded rows
+ *   current, as for any other model.
+ *
  * This file knows nothing of the app: the models and how to talk to the
  * server come in through `EngineConfig`.
  */
@@ -26,9 +41,22 @@ export type EngineConfig = {
   name: string
   /** Bump to drop the local cache (new models or columns). */
   schemaVersion: number
-  models: readonly string[]
-  /** Every row the user may read, and the sync id they are as of. */
-  bootstrap(): Promise<{ lastSyncId: number; rows: Record<string, Row[]> }>
+  models: readonly ModelName[]
+  /** Models loaded only by queries, not by the bootstrap. */
+  lazy?: readonly ModelName[]
+  /** Every row of `models` the user may read, and the sync id they are as of. */
+  bootstrap(
+    models: readonly ModelName[]
+  ): Promise<{ lastSyncId: number; rows: Record<string, Row[]> }>
+  /**
+   * The rows of `model` that `source` returns for `params` (column = value),
+   * and a sync id they are at least as new as (read before the rows).
+   */
+  query?(
+    model: ModelName,
+    source: string,
+    params: Record<string, unknown>
+  ): Promise<{ syncId: number; rows: Row[] }>
   /** Sync actions after `syncId`, oldest first, at most `limit`. */
   delta(syncId: number, limit: number): Promise<SyncAction[]>
   /** Calls `poke` when there may be new sync actions; returns the unsubscribe. */
@@ -56,7 +84,20 @@ type Transaction = {
   syncId?: number
 }
 
+/** A query's state; `ids` is null until it was fetched once. */
+type QueryState = {
+  ids: Set<string> | null
+  version: number
+  watchers: number
+  loading: Promise<void> | null
+  spec: QuerySpec<ModelName> | null
+  cache?: { at: string; rows: Row[] }
+}
+
 const META = "_meta"
+const QUERY_PREFIX = "query:"
+/** Fetches of a query whose rows came back older than the pool. */
+const QUERY_ATTEMPTS = 3
 const TRANSACTIONS = "_transactions"
 const DELTA_LIMIT = 1000
 /** Transactions per request; the rest go in the next one. */
@@ -80,6 +121,8 @@ export class SyncEngine {
   private catchingUp: Promise<void> | null = null
   private catchUpAgain = false
   private cleanup: (() => void)[] = []
+  private queries = new Map<string, QueryState>()
+  private refetchTimer: ReturnType<typeof setTimeout> | undefined
 
   constructor(private config: EngineConfig) {
     this.pool = new Pool(config.models)
@@ -97,7 +140,11 @@ export class SyncEngine {
    * mutation `name(...args)` behind it. Resolves to the error message once
    * it failed (and was rolled back), or undefined once the server ran it.
    */
-  commit(name: string, args: unknown[], changes: Change[]) {
+  commit<N extends MutationName>(
+    name: N,
+    args: MutationArgs<N>,
+    changes: Change[]
+  ) {
     const tx: Transaction = {
       id: crypto.randomUUID(),
       tab: this.tab,
@@ -113,6 +160,82 @@ export class SyncEngine {
     )
     queueMicrotask(() => void this.flush())
     return result
+  }
+
+  /**
+   * A draft of a row in the pool: assign fields, then `save()` (see
+   * `draft.ts`). Throws when the pool has no such row.
+   */
+  draft<M extends ModelName>(model: M, id: string): Draft<RowOf<M>> {
+    if (!this.pool.get(model, id))
+      throw new Error(`No ${model} row ${id} in the pool.`)
+    return makeDraft<RowOf<M>>(this, model, id, false)
+  }
+
+  /**
+   * A new row as a draft: not in the pool until `save()` inserts it. The id
+   * is `fields.id` or a new UUID.
+   */
+  create<M extends ModelName>(
+    model: M,
+    fields: Partial<FieldsOf<M>> & { id?: string } = {}
+  ): Draft<RowOf<M>> {
+    const id = typeof fields.id === "string" ? fields.id : crypto.randomUUID()
+    return makeDraft<RowOf<M>>(this, model, id, true, fields)
+  }
+
+  /**
+   * The rows of a query (see `QuerySpec`), from the pool; the same array
+   * until they change. Undefined until it was fetched once (here or in an
+   * earlier visit): call `loadQuery` or `watchQuery` to fetch it.
+   */
+  queryRows<M extends ModelName>(spec: QuerySpec<M>): RowOf<M>[] | undefined {
+    const state = this.queries.get(queryKey(spec))
+    if (!state?.ids) return undefined
+    const at = `${this.pool.version(spec.model)}:${state.version}`
+    if (state.cache?.at === at) return state.cache.rows as RowOf<M>[]
+    let rows: RowOf<M>[]
+    if (spec.filter) rows = this.pool.rows(spec.model).filter(spec.filter)
+    else {
+      rows = []
+      for (const id of state.ids) {
+        const row = this.pool.get(spec.model, id)
+        if (row) rows.push(row)
+      }
+    }
+    if (spec.sort) rows = [...rows].sort(spec.sort)
+    state.cache = { at, rows: rows as Row[] }
+    return rows
+  }
+
+  /**
+   * Fetches a query and adds its rows to the pool. One fetch per query at a
+   * time: a call while one runs gets that one. Rejects when it fails and
+   * the query has no rows from before.
+   */
+  loadQuery<M extends ModelName>(spec: QuerySpec<M>): Promise<void> {
+    const state = this.queryState(spec)
+    state.loading ??= this.fetchQuery(state, spec)
+      .catch((e) => {
+        // Offline: the rows from before stay.
+        if (!state.ids) throw e
+        console.error("sync query failed", e)
+      })
+      .finally(() => {
+        state.loading = null
+      })
+    return state.loading
+  }
+
+  /**
+   * Keeps a query fresh while it is shown: fetches it now and, for a query
+   * without `filter`, again whenever its model changes. Returns the stop.
+   */
+  watchQuery<M extends ModelName>(spec: QuerySpec<M>) {
+    const state = this.queryState(spec)
+    state.watchers++
+    this.loadQuery(spec).catch((e) => console.error("sync query failed", e))
+    return () => void state.watchers--
   }
 
   /** Fetches what changed on the server now (e.g. after a server action). */
@@ -132,6 +255,7 @@ export class SyncEngine {
 
   stop() {
     clearTimeout(this.retryTimer)
+    clearTimeout(this.refetchTimer)
     for (const c of this.cleanup) c()
     this.db?.close()
   }
@@ -159,6 +283,8 @@ export class SyncEngine {
     if (cached) {
       this.pool.load(cached.rows)
       this.lastSyncId = cached.lastSyncId
+      for (const { key, ids } of cached.queries)
+        Object.assign(this.queryState(null, key), { ids: new Set(ids) })
       await this.adopt(cached.transactions)
       this.subscribe()
       void this.catchUp()
@@ -172,15 +298,26 @@ export class SyncEngine {
   private async readCache() {
     const db = this.db
     if (!db) return null
-    const [meta] = await getAll<{ id: string; lastSyncId: number }>(db, META)
+    const records = await getAll<
+      { id: string; lastSyncId: number } | { id: string; ids: string[] }
+    >(db, META)
+    const meta = records.find((r) => r.id === "meta") as
+      | { lastSyncId: number }
+      | undefined
     // Written with the bootstrap: without it the stores are not complete.
     if (!meta) return null
+    const queries = records
+      .filter((r) => r.id.startsWith(QUERY_PREFIX))
+      .map((r) => ({
+        key: r.id.slice(QUERY_PREFIX.length),
+        ids: (r as { ids: string[] }).ids,
+      }))
     const rows: Record<string, Row[]> = {}
     await Promise.all(
       this.config.models.map(async (m) => (rows[m] = await getAll(db, m)))
     )
     const transactions = await getAll<Transaction>(db, TRANSACTIONS)
-    return { lastSyncId: meta.lastSyncId, rows, transactions }
+    return { lastSyncId: meta.lastSyncId, rows, transactions, queries }
   }
 
   /**
@@ -212,7 +349,10 @@ export class SyncEngine {
     // Retried until it works: without it there is nothing to show.
     for (let attempt = 0; ; attempt++) {
       try {
-        const { lastSyncId, rows } = await this.config.bootstrap()
+        const lazy = this.config.lazy ?? []
+        const { lastSyncId, rows } = await this.config.bootstrap(
+          this.config.models.filter((m) => !lazy.includes(m))
+        )
         this.pool.load(rows)
         this.lastSyncId = lastSyncId
         await this.persistAll(rows)
@@ -279,6 +419,7 @@ export class SyncEngine {
     const touched = this.pool.apply(actions)
     this.lastSyncId = actions.at(-1)!.id
     this.completeConfirmed()
+    this.refetchQueries(touched.keys())
     const db = this.db
     if (!db) return
     await write(db, [...touched.keys(), META], (store) => {
@@ -353,6 +494,58 @@ export class SyncEngine {
     void this.flush()
   }
 
+  private queryState(spec: QuerySpec<ModelName> | null, key = queryKey(spec!)) {
+    let state = this.queries.get(key)
+    if (!state) {
+      state = { ids: null, version: 0, watchers: 0, loading: null, spec: null }
+      this.queries.set(key, state)
+    }
+    state.spec ??= spec
+    return state
+  }
+
+  private async fetchQuery(state: QueryState, spec: QuerySpec<ModelName>) {
+    if (!this.config.query) throw new Error("EngineConfig.query is missing.")
+    // Before the pool is loaded, `merge` cannot tell which rows it has.
+    await this.ready
+    let result
+    for (let attempt = 1; ; attempt++) {
+      result = await this.config.query(spec.model, spec.source, spec.params ?? {})
+      // Rows older than the pool could bring back one it has seen deleted
+      // since; fetch again (the next one is newer).
+      if (result.syncId >= this.lastSyncId || attempt === QUERY_ATTEMPTS) break
+    }
+    const added = this.pool.merge(spec.model, result.rows)
+    state.ids = new Set(result.rows.map((r) => r.id))
+    state.version++
+    this.pool.touch([spec.model])
+    const db = this.db
+    if (!db) return
+    await write(db, [spec.model, META], (store) => {
+      for (const r of added) store(spec.model).put(r)
+      store(META).put({
+        id: QUERY_PREFIX + queryKey(spec),
+        ids: Array.from(state.ids!),
+      })
+    }).catch((e) => console.error("sync cache write failed", e))
+  }
+
+  /** Fetches the shown queries without `filter` of the models that changed. */
+  private refetchQueries(models: Iterable<string>) {
+    const changed = new Set(models)
+    const due = Array.from(this.queries.values()).filter(
+      (q) => q.watchers > 0 && q.spec && !q.spec.filter && changed.has(q.spec.model)
+    )
+    if (!due.length) return
+    clearTimeout(this.refetchTimer)
+    this.refetchTimer = setTimeout(() => {
+      for (const q of due)
+        this.loadQuery(q.spec!).catch((e) =>
+          console.error("sync query failed", e)
+        )
+    }, 300)
+  }
+
   private async persistAll(rows: Record<string, Row[]>) {
     const db = this.db
     if (!db) return
@@ -382,4 +575,12 @@ export class SyncEngine {
 }
 
 const lockName = (tab: string) => `sync-tab:${tab}`
+
+/** A query's identity: model, source and params (in key order). */
+export function queryKey(spec: QuerySpec<ModelName>) {
+  const params = Object.entries(spec.params ?? {}).sort(([a], [b]) =>
+    a < b ? -1 : 1
+  )
+  return JSON.stringify([spec.model, spec.source, params])
+}
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))

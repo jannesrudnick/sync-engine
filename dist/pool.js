@@ -77,13 +77,31 @@ export class Pool {
         this.notify(touched.keys());
         return touched;
     }
+    /**
+     * Adds server rows the pool does not have yet (from a query) and returns
+     * them. Rows it has are kept: sync actions keep them current, so they are
+     * at least as new.
+     */
+    merge(model, rows) {
+        const map = this.base.get(model);
+        if (!map)
+            return [];
+        const added = rows.filter((r) => !map.has(r.id));
+        for (const r of added) {
+            map.set(r.id, r);
+            this.recompute(model, r.id);
+        }
+        if (added.length)
+            this.notify([model]);
+        return added;
+    }
     /** The confirmed row, without pending changes. */
     baseRow(model, id) {
         return this.base.get(model)?.get(id);
     }
     /** Lays a transaction's changes over base. */
     push(key, changes) {
-        this.layers.push({ key, changes });
+        this.layers.push({ key, changes: changes });
         for (const c of changes)
             this.recompute(c.model, c.id);
         this.notify(changes.map((c) => c.model));
@@ -99,8 +117,8 @@ export class Pool {
         this.notify(layer.changes.map((c) => c.model));
     }
     /** Tells every subscriber to read again (e.g. once the pool is ready). */
-    touch() {
-        this.notify(this.models);
+    touch(models = this.models) {
+        this.notify(models);
     }
     recompute(model, id) {
         let row = this.base.get(model)?.get(id);

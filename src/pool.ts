@@ -10,10 +10,12 @@
  * server confirmed is dropped once base has its effect.
  */
 
-export type Row = { id: string } & Record<string, unknown>
+import type { Change, ModelName, Row, RowOf } from "./types"
 
-/** One optimistic change of a transaction. */
-export type Change =
+export type { Change, Row }
+
+/** `Change` as the pool handles it: any model, any row. */
+type AnyChange =
   | { model: string; id: string; op: "set"; row: Row }
   | { model: string; id: string; op: "patch"; patch: Record<string, unknown> }
   | { model: string; id: string; op: "delete" }
@@ -30,7 +32,7 @@ export type SyncAction = {
 export class Pool {
   private base = new Map<string, Map<string, Row>>()
   private visible = new Map<string, Map<string, Row>>()
-  private layers: { key: string; changes: Change[] }[] = []
+  private layers: { key: string; changes: AnyChange[] }[] = []
   private versions = new Map<string, number>()
   private arrays = new Map<string, { version: number; rows: Row[] }>()
   private listeners = new Set<() => void>()
@@ -43,18 +45,18 @@ export class Pool {
     }
   }
 
-  get<T extends Row>(model: string, id: string) {
-    return this.visible.get(model)?.get(id) as T | undefined
+  get<M extends ModelName>(model: M, id: string) {
+    return this.visible.get(model)?.get(id) as RowOf<M> | undefined
   }
 
   /** All rows of `model`; the same array until one of them changes. */
-  rows<T extends Row>(model: string): T[] {
+  rows<M extends ModelName>(model: M): RowOf<M>[] {
     const version = this.version(model)
     const cached = this.arrays.get(model)
-    if (cached?.version === version) return cached.rows as T[]
+    if (cached?.version === version) return cached.rows as RowOf<M>[]
     const rows = Array.from(this.visible.get(model)!.values())
     this.arrays.set(model, { version, rows })
-    return rows as T[]
+    return rows as RowOf<M>[]
   }
 
   /** Grows with every change of `model`. */
@@ -94,6 +96,23 @@ export class Pool {
     return touched
   }
 
+  /**
+   * Adds server rows the pool does not have yet (from a query) and returns
+   * them. Rows it has are kept: sync actions keep them current, so they are
+   * at least as new.
+   */
+  merge(model: string, rows: Row[]) {
+    const map = this.base.get(model)
+    if (!map) return []
+    const added = rows.filter((r) => !map.has(r.id))
+    for (const r of added) {
+      map.set(r.id, r)
+      this.recompute(model, r.id)
+    }
+    if (added.length) this.notify([model])
+    return added
+  }
+
   /** The confirmed row, without pending changes. */
   baseRow(model: string, id: string) {
     return this.base.get(model)?.get(id)
@@ -101,7 +120,7 @@ export class Pool {
 
   /** Lays a transaction's changes over base. */
   push(key: string, changes: Change[]) {
-    this.layers.push({ key, changes })
+    this.layers.push({ key, changes: changes as AnyChange[] })
     for (const c of changes) this.recompute(c.model, c.id)
     this.notify(changes.map((c) => c.model))
   }
@@ -116,8 +135,8 @@ export class Pool {
   }
 
   /** Tells every subscriber to read again (e.g. once the pool is ready). */
-  touch() {
-    this.notify(this.models)
+  touch(models: Iterable<string> = this.models) {
+    this.notify(models)
   }
 
   private recompute(model: string, id: string) {

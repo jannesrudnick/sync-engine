@@ -9,25 +9,8 @@
  * transaction that fails is dropped and its rows fall back to base; one the
  * server confirmed is dropped once base has its effect.
  */
-export type Row = {
-    id: string;
-} & Record<string, unknown>;
-/** One optimistic change of a transaction. */
-export type Change = {
-    model: string;
-    id: string;
-    op: "set";
-    row: Row;
-} | {
-    model: string;
-    id: string;
-    op: "patch";
-    patch: Record<string, unknown>;
-} | {
-    model: string;
-    id: string;
-    op: "delete";
-};
+import type { Change, ModelName, Row, RowOf } from "./types";
+export type { Change, Row };
 /** A server-side change, as `sync_actions` stores it. */
 export type SyncAction = {
     id: number;
@@ -45,9 +28,9 @@ export declare class Pool {
     private arrays;
     private listeners;
     constructor(models: readonly string[]);
-    get<T extends Row>(model: string, id: string): T | undefined;
+    get<M extends ModelName>(model: M, id: string): RowOf<M> | undefined;
     /** All rows of `model`; the same array until one of them changes. */
-    rows<T extends Row>(model: string): T[];
+    rows<M extends ModelName>(model: M): RowOf<M>[];
     /** Grows with every change of `model`. */
     version(model: string): number;
     subscribe(listener: () => void): () => undefined;
@@ -55,6 +38,12 @@ export declare class Pool {
     load(rows: Record<string, Row[]>): void;
     /** Applies server changes to base; returns the rows to store and delete. */
     apply(actions: SyncAction[]): Map<string, Set<string>>;
+    /**
+     * Adds server rows the pool does not have yet (from a query) and returns
+     * them. Rows it has are kept: sync actions keep them current, so they are
+     * at least as new.
+     */
+    merge(model: string, rows: Row[]): Row[];
     /** The confirmed row, without pending changes. */
     baseRow(model: string, id: string): Row | undefined;
     /** Lays a transaction's changes over base. */
@@ -62,7 +51,7 @@ export declare class Pool {
     /** Takes a transaction's changes off again (failed or confirmed). */
     drop(key: string): void;
     /** Tells every subscriber to read again (e.g. once the pool is ready). */
-    touch(): void;
+    touch(models?: Iterable<string>): void;
     private recompute;
     private recomputeAll;
     private notify;
